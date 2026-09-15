@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>원본 데이터 암호화 도구</title>
+<style>
+  :root{
+    --bg:#f4f6f9; --card:#ffffff; --text:#1c2530; --muted:#647082;
+    --border:#e1e6ee; --accent:#2563eb; --accent-soft:#eaf1ff;
+    --err:#dc2626; --ok:#16a34a;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; min-height:100vh; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Malgun Gothic",Roboto,sans-serif;
+    display:flex; align-items:flex-start; justify-content:center; padding:40px 16px;
+  }
+  .card{
+    width:100%; max-width:520px; background:var(--card); border:1px solid var(--border);
+    border-radius:16px; padding:32px; box-shadow:0 8px 24px rgba(20,30,50,.06);
+  }
+  h1{font-size:19px; margin:0 0 4px;}
+  .sub{color:var(--muted); font-size:13px; margin:0 0 24px; line-height:1.6;}
+  label{display:block; font-size:13px; font-weight:600; margin:18px 0 8px;}
+  .opts{display:flex; flex-direction:column; gap:8px;}
+  .opt{
+    display:flex; align-items:flex-start; gap:10px; border:1px solid var(--border);
+    border-radius:10px; padding:12px; cursor:pointer; font-size:13px;
+  }
+  .opt.active{border-color:var(--accent); background:var(--accent-soft);}
+  .opt input{margin-top:2px;}
+  .opt .t{font-weight:600;}
+  .opt .d{color:var(--muted); font-size:12px; margin-top:2px;}
+  input[type=file], input[type=password]{
+    width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:8px;
+    font-size:14px; background:#fff; color:var(--text);
+  }
+  input[type=password]{font-family:monospace;}
+  button{
+    width:100%; margin-top:24px; padding:12px; border:none; border-radius:10px;
+    background:var(--accent); color:#fff; font-size:15px; font-weight:700; cursor:pointer;
+  }
+  button:disabled{opacity:.5; cursor:default;}
+  .msg{margin-top:14px; font-size:13px; line-height:1.6; white-space:pre-wrap;}
+  .msg.err{color:var(--err);}
+  .msg.ok{color:var(--ok);}
+  .fname{margin-top:14px; padding:10px 12px; background:#f7f9fc; border:1px solid var(--border);
+    border-radius:8px; font-size:12px; color:var(--muted); word-break:break-all;}
+  .fname b{color:var(--text);}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>원본 데이터 암호화 도구</h1>
+  <p class="sub">
+    이 페이지는 인터넷에 아무것도 전송하지 않습니다. 파일 선택 → 암호화 → 다운로드까지
+    전부 이 브라우저 안에서만 처리됩니다. 완성된 파일을 GitHub 저장소에 올리면 되고,
+    원본 엑셀 파일은 그대로 두고 암호화된 파일만 업로드하면 됩니다.
+  </p>
+
+  <label>무엇을 암호화하나요?</label>
+  <div class="opts" id="targetOpts">
+    <label class="opt active">
+      <input type="radio" name="target" value="raw" checked>
+      <div>
+        <div class="t">매주 받는 Raw 데이터 엑셀 파일</div>
+        <div class="d">저장소의 data/raw.xlsx.enc 로 저장됩니다 (매주 교체)</div>
+      </div>
+    </label>
+    <label class="opt">
+      <input type="radio" name="target" value="master">
+      <div>
+        <div class="t">기준정보 마스터 파일 (Members / 거래처 List 등)</div>
+        <div class="d">저장소의 reference/master.xlsx.enc 로 저장됩니다 (거의 안 바뀜)</div>
+      </div>
+    </label>
+  </div>
+
+  <label for="file">엑셀 파일 선택</label>
+  <input type="file" id="file" accept=".xlsx">
+
+  <label for="pw">비밀번호</label>
+  <input type="password" id="pw" placeholder="대시보드와 동일한 비밀번호" autocomplete="off">
+
+  <button id="go">암호화 후 다운로드</button>
+  <div class="msg" id="msg"></div>
+  <div class="fname" id="fname" hidden></div>
+</div>
+
+<script>
+"use strict";
+var PBKDF2_ITERATIONS = 250000;
+
+var opts = document.querySelectorAll('#targetOpts .opt');
+opts.forEach(function(o){
+  o.addEventListener('click', function(){
+    opts.forEach(function(x){ x.classList.remove('active'); });
+    o.classList.add('active');
+  });
+});
+
+function bytesToB64(bytes){
+  var bin = '';
+  for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+function setMsg(text, cls){
+  var el = document.getElementById('msg');
+  el.textContent = text;
+  el.className = 'msg' + (cls ? ' ' + cls : '');
+}
+
+document.getElementById('go').addEventListener('click', async function(){
+  var fileInput = document.getElementById('file');
+  var pw = document.getElementById('pw').value;
+  var target = document.querySelector('input[name=target]:checked').value;
+  var outName = target === 'raw' ? 'raw.xlsx.enc' : 'master.xlsx.enc';
+  var destHint = target === 'raw' ? 'data/raw.xlsx.enc' : 'reference/master.xlsx.enc';
+
+  document.getElementById('fname').hidden = true;
+  setMsg('');
+
+  if (!fileInput.files.length){ setMsg('엑셀 파일을 선택하세요.', 'err'); return; }
+  if (!pw){ setMsg('비밀번호를 입력하세요.', 'err'); return; }
+
+  var btn = document.getElementById('go');
+  btn.disabled = true;
+  setMsg('암호화 중...');
+
+  try{
+    var file = fileInput.files[0];
+    var plainBuf = await file.arrayBuffer();
+
+    var salt = crypto.getRandomValues(new Uint8Array(16));
+    var iv = crypto.getRandomValues(new Uint8Array(12));
+    var enc = new TextEncoder();
+
+    var baseKey = await crypto.subtle.importKey('raw', enc.encode(pw), 'PBKDF2', false, ['deriveKey']);
+    var key = await crypto.subtle.deriveKey(
+      {name:'PBKDF2', salt:salt, iterations:PBKDF2_ITERATIONS, hash:'SHA-256'},
+      baseKey, {name:'AES-GCM', length:256}, false, ['encrypt']
+    );
+    var ctBuf = await crypto.subtle.encrypt({name:'AES-GCM', iv:iv}, key, plainBuf);
+
+    // Compact binary container (avoids ~33% base64/JSON bloat for large files):
+    //   4 bytes  magic "ENC1"
+    //   16 bytes salt
+    //   12 bytes iv
+    //   4 bytes  PBKDF2 iteration count (big-endian uint32)
+    //   ...      AES-GCM ciphertext (includes the 16-byte auth tag)
+    var magic = new Uint8Array([0x45, 0x4e, 0x43, 0x31]); // "ENC1"
+    var iterBytes = new Uint8Array(4);
+    new DataView(iterBytes.buffer).setUint32(0, PBKDF2_ITERATIONS, false);
+
+    var container = new Blob([magic, salt, iv, iterBytes, ctBuf], {type:'application/octet-stream'});
+    var url = URL.createObjectURL(container);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = outName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    setMsg('완료! 다운로드된 "' + outName + '" 파일을 GitHub 저장소의 아래 위치에 업로드(덮어쓰기)하세요.', 'ok');
+    var fnameEl = document.getElementById('fname');
+    fnameEl.hidden = false;
+    fnameEl.innerHTML = '저장 위치: <b>' + destHint + '</b><br>(같은 이름의 기존 파일을 교체하도록 업로드하면 됩니다)';
+  }catch(e){
+    setMsg('오류가 발생했습니다: ' + e.message, 'err');
+  }finally{
+    btn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
