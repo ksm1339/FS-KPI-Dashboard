@@ -17,6 +17,10 @@ TEAM_SHORT = {'FS WEST':'WEST','FS EAST':'EAST','FS Central':'CENTRAL','FS South
 def r2(x):
     return round(x, 2) if isinstance(x, (int, float)) else x
 
+CAL_MONTHS = agg.get('cal_months', [])
+TODAY_MONTH = agg['fy_meta']['today'][:7]
+PARTIAL_MONTH = TODAY_MONTH if TODAY_MONTH in CAL_MONTHS else None
+
 def build_person_entry(name, team):
     gc = agg['person_group'].get(name, {})
     mt = agg['person_mttr'].get(name, {})
@@ -24,6 +28,25 @@ def build_person_entry(name, team):
     mo = agg['person_month'].get(name, {})
     sc = agg['person_score'].get(name, {})
     scg = agg['person_score_group'].get(name, {})
+    cal_sg = agg.get('person_cal_score_group', {}).get(name, {})
+    cal_g = agg.get('person_cal_group', {}).get(name, {})
+    cal_b = agg.get('person_cal_bucket', {}).get(name, {})
+    cal_mttr = agg.get('person_cal_mttr', {}).get(name, {})
+
+    # calendar-month trend series (full raw-data history, not FY-period buckets):
+    # one value per entry in CAL_MONTHS, broken down by business(group) for KPI
+    # score/case-count/MTTR and by service type for case-count, matching the
+    # breakdown of each metric's own cumulative (per-period) bar chart above.
+    trend_score_group = {g: [r2(cal_sg.get(m, {}).get(g, 0.0)) for m in CAL_MONTHS] for g in GROUPS}
+    trend_group = {g: [cal_g.get(m, {}).get(g, 0) for m in CAL_MONTHS] for g in GROUPS}
+    trend_bucket = {b: [cal_b.get(m, {}).get(b, 0) for m in CAL_MONTHS] for b in BUCKETS}
+    trend_mttr = {}
+    for g in GROUPS:
+        vals = []
+        for m in CAL_MONTHS:
+            d = cal_mttr.get(m, {}).get(g)
+            vals.append(r2(d['sum']/d['n']) if d and d.get('n') else None)
+        trend_mttr[g] = vals
 
     group_case = {}
     mttr = {}
@@ -67,6 +90,10 @@ def build_person_entry(name, team):
         'top_accounts': agg['person_account_top'].get(name, []),
         'score': score,
         'score_group': score_group,
+        'trend_score_group': trend_score_group,
+        'trend_group': trend_group,
+        'trend_bucket': trend_bucket,
+        'trend_mttr': trend_mttr,
     }
 
 person_out = {}
@@ -188,6 +215,44 @@ for team in TEAMS:
         'total_hospital_count': total_qualifying,
     }
 
+# ---------- monthly revisit/FTFR trend (calendar-month, full raw-data history) ----------
+monthly = agg.get('revisit_monthly_by_team', {})
+all_months = sorted({mk for t in TEAMS for mk in monthly.get(t, {})})
+today_month = agg['fy_meta']['today'][:7]  # 'YYYY-MM' — current (likely partial) month
+
+def rate_pair(cell):
+    rv = round(cell['ad'] / cell['n_rv'] * 100, 1) if cell.get('n_rv') else None
+    ft = round((cell['n_ftfr'] - cell['ae']) / cell['n_ftfr'] * 100, 1) if cell.get('n_ftfr') else None
+    return rv, ft
+
+teams_trend = {}
+company_cells = {mk: {'n_rv':0,'ad':0,'n_ftfr':0,'ae':0} for mk in all_months}
+for team in TEAMS:
+    tm = monthly.get(team, {})
+    revisit_arr, ftfr_arr, n_rv_arr, n_ftfr_arr = [], [], [], []
+    for mk in all_months:
+        cell = tm.get(mk, {'n_rv':0,'ad':0,'n_ftfr':0,'ae':0})
+        rv, ft = rate_pair(cell)
+        revisit_arr.append(rv); ftfr_arr.append(ft)
+        n_rv_arr.append(cell.get('n_rv', 0)); n_ftfr_arr.append(cell.get('n_ftfr', 0))
+        cc = company_cells[mk]
+        cc['n_rv'] += cell.get('n_rv', 0); cc['ad'] += cell.get('ad', 0)
+        cc['n_ftfr'] += cell.get('n_ftfr', 0); cc['ae'] += cell.get('ae', 0)
+    teams_trend[team] = {'revisit': revisit_arr, 'ftfr': ftfr_arr, 'n_rv': n_rv_arr, 'n_ftfr': n_ftfr_arr}
+
+company_revisit, company_ftfr, company_n_rv, company_n_ftfr = [], [], [], []
+for mk in all_months:
+    rv, ft = rate_pair(company_cells[mk])
+    company_revisit.append(rv); company_ftfr.append(ft)
+    company_n_rv.append(company_cells[mk]['n_rv']); company_n_ftfr.append(company_cells[mk]['n_ftfr'])
+
+revisit_trend = {
+    'months': all_months,
+    'partial_month': today_month if today_month in all_months else None,
+    'company': {'revisit': company_revisit, 'ftfr': company_ftfr, 'n_rv': company_n_rv, 'n_ftfr': company_n_ftfr},
+    'teams': teams_trend,
+}
+
 final = {
     'teams': TEAMS,
     'team_short': TEAM_SHORT,
@@ -203,6 +268,9 @@ final = {
     'team': team_out,
     'company': company_out,
     'revisit': revisit_out,
+    'revisit_trend': revisit_trend,
+    'trend_months': CAL_MONTHS,
+    'trend_partial_month': PARTIAL_MONTH,
     'revisit_snapshot_date': agg['fy_meta']['today'][:10],
     'data_snapshot_date': agg['fy_meta']['today'][:10],
 }
