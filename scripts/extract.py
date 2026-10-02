@@ -160,6 +160,17 @@ person_account = defaultdict(Counter)
 person_score = defaultdict(lambda: defaultdict(float))               # [person][period] -> total weighted score
 person_score_group = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))  # [person][period][group] -> score
 
+# ---------- NEW: calendar-month trend series, for the person-level "추이" charts
+# (KPI score / case count broken down by business(group), case count by service type,
+# MTTR) shown alongside each existing per-period cumulative bar. Keyed by real
+# calendar month ('YYYY-MM') across the whole raw-data window, not the FY period
+# buckets used elsewhere, so these read as a continuous month-over-month trend.
+person_cal_score_group = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))   # [person][cal_month][group] -> score
+person_cal_group = defaultdict(lambda: defaultdict(Counter))                             # [person][cal_month][group] -> case count
+person_cal_bucket = defaultdict(lambda: defaultdict(Counter))                            # [person][cal_month][bucket] -> case count
+person_cal_mttr = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: {'sum':0.0,'n':0})))  # [person][cal_month][group] -> {sum,n}
+all_cal_months = set()
+
 n = 0
 excluded_cancelled = 0
 excluded_mttr_outlier = 0
@@ -196,13 +207,21 @@ for row in all_rows:
     if group:
         person_score_group[person][period][group] += w
 
+    cal_month = '%04d-%02d' % (st_dt.year, st_dt.month)
+    all_cal_months.add(cal_month)
+    if group:
+        person_cal_score_group[person][cal_month][group] += w
+
     if group:
         person_group[person][period][group] += 1
+        person_cal_group[person][cal_month][group] += 1
         if purpose == '고장 수리' and isinstance(en_dt, datetime.datetime):
             mins = (en_dt - st_dt).total_seconds() / 60.0
             if 0 <= mins <= 500:
                 person_mttr[person][period][group]['sum'] += mins
                 person_mttr[person][period][group]['n'] += 1
+                person_cal_mttr[person][cal_month][group]['sum'] += mins
+                person_cal_mttr[person][cal_month][group]['n'] += 1
             elif mins > 500:
                 excluded_mttr_outlier += 1
     else:
@@ -213,6 +232,7 @@ for row in all_rows:
         unmatched_purpose_rows += 1
     person_case[person][period][b] += 1
     person_month[person][period][st_dt.month] += 1
+    person_cal_bucket[person][cal_month][b] += 1
 
     if account and b in ('고장수리', 'PM'):
         person_account[person][account] += 1
@@ -316,6 +336,35 @@ print('revisit: accounts with a resolved team:', sum(len(v) for v in revisit_by_
 for t in TEAMS:
     print(' ', t, 'accounts:', len(revisit_by_team.get(t, {})))
 
+# ---------- NEW: monthly revisit/FTFR trend (calendar month, across full history) ----------
+# Grouped by the repair/PM visit's calendar month (its end-time), per team and company-wide.
+# Kept separate from the FY-period buckets above: this trend is meant to show real
+# month-over-month movement across the whole raw-data window, not just FY snapshots.
+def month_key(dt):
+    return '%04d-%02d' % (dt.year, dt.month)
+
+team_month = defaultdict(lambda: defaultdict(lambda: {'n_rv':0,'ad':0,'n_ftfr':0,'ae':0}))
+for rec in revisit_recs:
+    if rec['purpose'] not in ('고장 수리', 'PM'):
+        continue
+    team = account_team_of(rec['account'])
+    if team not in TEAMS:
+        continue
+    mk = month_key(rec['end'])
+    cell = team_month[team][mk]
+    cell['n_rv'] += 1
+    if rec.get('AD') == 1:
+        cell['ad'] += 1
+    if rec['purpose'] == '고장 수리':
+        cell['n_ftfr'] += 1
+        if rec.get('AE') == 1:
+            cell['ae'] += 1
+
+print()
+print('monthly revisit trend: months with data per team:')
+for t in TEAMS:
+    print(' ', t, len(team_month.get(t, {})))
+
 # ---------- validation samples ----------
 print()
 print('sample: 채대석 이번년도 group counts:', {g: person_group['채대석']['이번 년도'][g] for g in GROUPS_ORDER})
@@ -336,6 +385,12 @@ out = {
     'person_score': {p: dict(d) for p, d in person_score.items()},
     'person_score_group': {p: {per: dict(g) for per, g in d.items()} for p, d in person_score_group.items()},
     'revisit_by_team': revisit_by_team,
+    'revisit_monthly_by_team': {t: dict(v) for t, v in team_month.items()},
+    'cal_months': sorted(all_cal_months),
+    'person_cal_score_group': {p: {m: dict(g) for m, g in mm.items()} for p, mm in person_cal_score_group.items()},
+    'person_cal_group': {p: {m: dict(c) for m, c in mm.items()} for p, mm in person_cal_group.items()},
+    'person_cal_bucket': {p: {m: dict(c) for m, c in mm.items()} for p, mm in person_cal_bucket.items()},
+    'person_cal_mttr': {p: {m: {g: dict(v) for g, v in gg.items()} for m, gg in mm.items()} for p, mm in person_cal_mttr.items()},
 }
 BUILD_DIR = os.path.join(REPO_ROOT, 'build')
 os.makedirs(BUILD_DIR, exist_ok=True)
