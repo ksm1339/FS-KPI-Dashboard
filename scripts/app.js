@@ -214,6 +214,148 @@ function lineChart(container, months, seriesArr, opts){
   renderLegend(container, seriesArr.map(function(s){return {label:s.name, color:s.color, line:true};}));
 }
 
+// percentage trend chart: calendar-month x-axis (any number of months), fixed
+// 0-100% scale with a dashed benchmark reference line, thinned x-axis labels
+// when there are many months, and a dashed/hollow treatment for a trailing
+// partial (in-progress) month so it reads as provisional rather than a real dip.
+function pctTrendChart(container, months, seriesArr, opts){
+  opts = opts || {};
+  container.innerHTML = '';
+  var W = container.clientWidth || 600, H = opts.height || 230;
+  var padL = 40, padR = 16, padT = 16, padB = 26;
+  if (W < padL + padR + 80) W = 600;
+  var innerW = W - padL - padR, innerH = H - padT - padB;
+  var svg = svgEl('svg', {class:'chart', viewBox:'0 0 '+W+' '+H, height:H});
+  [0,20,40,60,80,100].forEach(function(tv){
+    var gy = padT + innerH - innerH*(tv/100);
+    svg.appendChild(svgEl('line', {class:'grid-line', x1:padL, x2:W-padR, y1:gy, y2:gy}));
+    var t = svgEl('text', {x:padL-8, y:gy+3, 'text-anchor':'end', 'font-size':'10'});
+    t.textContent = tv+'%';
+    svg.appendChild(t);
+  });
+  if (opts.target !== undefined && opts.target !== null){
+    var gy2 = padT + innerH - innerH*(opts.target/100);
+    svg.appendChild(svgEl('line', {x1:padL, x2:W-padR, y1:gy2, y2:gy2, stroke:resolveVar('var(--text-muted)'), 'stroke-width':1, 'stroke-dasharray':'4 3'}));
+    // Label is pinned to a fixed top corner rather than following the dashed line's own
+    // height: every series' data points run the full width of the plot (and cluster
+    // densely at the left-start and right/partial-month end), so a label anchored to the
+    // line's y would collide with data somewhere along it. A corner annotation box stays
+    // clear of the data in both the revisit chart (low band, top corner is empty) and the
+    // FTFR chart (high band, so we use the bottom corner there instead).
+    var corner = opts.target <= 50 ? 'top' : 'bottom';
+    var cy = corner === 'top' ? padT + 10 : H - padB - 6;
+    svg.appendChild(svgEl('text', {x:W-padR, y:cy, 'text-anchor':'end', 'font-size':'9', fill:resolveVar('var(--text-muted)')}))
+      .textContent = (opts.targetLabel||'목표')+' '+opts.target+'%';
+  }
+  var n = months.length;
+  var xFor = function(idx){ return n <= 1 ? padL+innerW/2 : padL + innerW*idx/(n-1); };
+  var step = Math.max(1, Math.ceil(n/8));
+  months.forEach(function(m, idx){
+    if (idx % step !== 0 && idx !== n-1) return;
+    var lbl = svgEl('text', {class:'axis-label', x:xFor(idx), y:H-8, 'text-anchor':'middle', 'font-size':'10'});
+    lbl.textContent = m.slice(2).replace('-', '.');
+    svg.appendChild(lbl);
+  });
+  seriesArr.forEach(function(s){
+    var pts = [];
+    months.forEach(function(m, idx){
+      var v = s.values[idx];
+      if (v === undefined || v === null) return;
+      pts.push([xFor(idx), padT + innerH - innerH*(v/100), v, idx]);
+    });
+    for (var i=1;i<pts.length;i++){
+      var a = pts[i-1], b = pts[i];
+      var attrs = {d:'M'+a[0].toFixed(1)+' '+a[1].toFixed(1)+' L'+b[0].toFixed(1)+' '+b[1].toFixed(1),
+        fill:'none', stroke:resolveVar(s.color), 'stroke-width':2, 'stroke-linecap':'round'};
+      if (opts.partialIndex !== undefined && opts.partialIndex !== null && (a[3] === opts.partialIndex || b[3] === opts.partialIndex)){
+        attrs['stroke-dasharray'] = '4 3';
+      }
+      svg.appendChild(svgEl('path', attrs));
+    }
+    pts.forEach(function(p){
+      var isPartial = p[3] === opts.partialIndex;
+      var c = svgEl('circle', {cx:p[0], cy:p[1], r:3.4, fill: isPartial ? resolveVar(s.color) : resolveVar('var(--surface)'), stroke:resolveVar(s.color), 'stroke-width':2});
+      c.style.cursor = 'pointer';
+      c.addEventListener('mousemove', function(e){
+        var nInfo = (s.n && s.n[p[3]] !== undefined) ? ' <span style="color:var(--text-muted)">(n='+s.n[p[3]]+')</span>' : '';
+        showTip(e, '<b>'+esc(months[p[3]])+(isPartial?' · 진행중':'')+'</b>'+esc(s.name)+': '+p[2].toFixed(1)+'%'+nInfo);
+      });
+      c.addEventListener('mouseleave', hideTip);
+      svg.appendChild(c);
+    });
+  });
+  container.appendChild(svg);
+  renderLegend(container, seriesArr.map(function(s){return {label:s.name, color:s.color, line:true};}));
+}
+
+// general-purpose calendar-month trend chart: auto-scaled y-axis (counts, scores,
+// minutes - whatever opts.unit says), any number of series (used for per-business-
+// group or per-service-type breakdowns, so often 5-6 lines), null-safe (a series
+// can have gaps, e.g. a month with no 고장수리 rows for MTTR), and the same thinned
+// x-axis labels + dashed/filled partial-month treatment as pctTrendChart.
+function calLineChart(container, months, seriesArr, opts){
+  opts = opts || {};
+  container.innerHTML = '';
+  var W = container.clientWidth || 600, H = opts.height || 230;
+  var padL = 40, padR = 16, padT = 16, padB = 26;
+  if (W < padL + padR + 80) W = 600;
+  var innerW = W - padL - padR, innerH = H - padT - padB;
+  var allVals = [0];
+  seriesArr.forEach(function(s){ s.values.forEach(function(v){ if (v !== undefined && v !== null) allVals.push(v); }); });
+  var maxV = Math.max(1, Math.max.apply(null, allVals) * 1.18);
+  var svg = svgEl('svg', {class:'chart', viewBox:'0 0 '+W+' '+H, height:H});
+  var ticks = 4;
+  for (var i=0;i<=ticks;i++){
+    var gy = padT + innerH - (innerH*i/ticks);
+    svg.appendChild(svgEl('line', {class:'grid-line', x1:padL, x2:W-padR, y1:gy, y2:gy}));
+    var t = svgEl('text', {x:padL-8, y:gy+3, 'text-anchor':'end', 'font-size':'10'});
+    var tv = maxV*i/ticks;
+    t.textContent = opts.decimals ? tv.toFixed(1) : fmt(Math.round(tv));
+    svg.appendChild(t);
+  }
+  var n = months.length;
+  var xFor = function(idx){ return n <= 1 ? padL+innerW/2 : padL + innerW*idx/(n-1); };
+  var step = Math.max(1, Math.ceil(n/8));
+  months.forEach(function(m, idx){
+    if (idx % step !== 0 && idx !== n-1) return;
+    var lbl = svgEl('text', {class:'axis-label', x:xFor(idx), y:H-8, 'text-anchor':'middle', 'font-size':'10'});
+    lbl.textContent = m.slice(2).replace('-', '.');
+    svg.appendChild(lbl);
+  });
+  var manySeries = seriesArr.length > 4;
+  seriesArr.forEach(function(s){
+    var pts = [];
+    months.forEach(function(m, idx){
+      var v = s.values[idx];
+      if (v === undefined || v === null) return;
+      pts.push([xFor(idx), padT + innerH - innerH*(v/maxV), v, idx]);
+    });
+    for (var i=1;i<pts.length;i++){
+      var a = pts[i-1], b = pts[i];
+      var attrs = {d:'M'+a[0].toFixed(1)+' '+a[1].toFixed(1)+' L'+b[0].toFixed(1)+' '+b[1].toFixed(1),
+        fill:'none', stroke:resolveVar(s.color), 'stroke-width':manySeries?1.6:2, 'stroke-linecap':'round'};
+      if (opts.partialIndex !== undefined && opts.partialIndex !== null && (a[3] === opts.partialIndex || b[3] === opts.partialIndex)){
+        attrs['stroke-dasharray'] = '4 3';
+      }
+      svg.appendChild(svgEl('path', attrs));
+    }
+    pts.forEach(function(p){
+      var isPartial = p[3] === opts.partialIndex;
+      var r = manySeries ? 2.4 : 3.4;
+      var c = svgEl('circle', {cx:p[0], cy:p[1], r:r, fill: isPartial ? resolveVar(s.color) : resolveVar('var(--surface)'), stroke:resolveVar(s.color), 'stroke-width':manySeries?1.3:2});
+      c.style.cursor = 'pointer';
+      c.addEventListener('mousemove', function(e){
+        var vs = opts.decimals ? p[2].toFixed(1) : fmt(p[2]);
+        showTip(e, '<b>'+esc(months[p[3]])+(isPartial?' · 진행중':'')+'</b>'+esc(s.name)+': '+vs+(opts.unit||''));
+      });
+      c.addEventListener('mouseleave', hideTip);
+      svg.appendChild(c);
+    });
+  });
+  container.appendChild(svg);
+  renderLegend(container, seriesArr.map(function(s){return {label:s.name, color:s.color, line:true};}));
+}
+
 function renderLegend(container, items){
   var leg = document.createElement('div');
   leg.className = 'legend';
@@ -304,6 +446,11 @@ function renderOverview(){
   html += '<div class="block"><div class="block-head"><h2>팀별 재방문율 / FTFR 개요</h2><span class="hint">고장수리+점검 기준, "'+period+'" 스냅샷</span></div>'+
     '<div class="grid grid-4" id="teamRevisitCards"></div></div>';
 
+  html += '<div class="block grid grid-2">'+
+    chartCard('revisit-trend-chart', '월별 재방문율 추이', '전사 · 팀별 비교 · '+DATA.revisit_trend.months[0]+' ~ '+DATA.revisit_trend.months[DATA.revisit_trend.months.length-1])+
+    chartCard('ftfr-trend-chart', '월별 FTFR 추이', '전사 · 팀별 비교 · '+DATA.revisit_trend.months[0]+' ~ '+DATA.revisit_trend.months[DATA.revisit_trend.months.length-1])+
+    '</div>';
+
   el.innerHTML = html;
 
   renderLeaderboardTable(period);
@@ -329,6 +476,15 @@ function renderOverview(){
       '<div class="stat-sub">FTFR '+pctStr(rv.ftfr)+' '+(reliable?targetPill(rv.ftfr, DATA.benchmarks.ftfr_target,'higher-better'):'')+'</div>';
     cardsEl.appendChild(card);
   });
+
+  var rt = DATA.revisit_trend;
+  var partialIdx = rt.partial_month ? rt.months.indexOf(rt.partial_month) : -1;
+  pctTrendChart(document.getElementById('revisit-trend-chart'), rt.months, DATA.teams.map(function(t){
+    return {name: DATA.team_short[t], color: TEAM_COLOR[t], values: rt.teams[t].revisit, n: rt.teams[t].n_rv};
+  }), {target: DATA.benchmarks.revisit_target, targetLabel:'목표', partialIndex: partialIdx>=0?partialIdx:undefined});
+  pctTrendChart(document.getElementById('ftfr-trend-chart'), rt.months, DATA.teams.map(function(t){
+    return {name: DATA.team_short[t], color: TEAM_COLOR[t], values: rt.teams[t].ftfr, n: rt.teams[t].n_ftfr};
+  }), {target: DATA.benchmarks.ftfr_target, targetLabel:'목표', partialIndex: partialIdx>=0?partialIdx:undefined});
 }
 function mapMonthVals(obj){
   var out = {};
@@ -449,6 +605,11 @@ function renderTeam(){
   html += '<div class="block"><div class="block-head"><h2>팀원별 순위</h2><span class="hint">열 제목 클릭 시 정렬 · 행 클릭 시 개인별 상세로 이동</span></div>'+
     '<div class="card table-scroll" style="padding:6px;"><table class="data-table" id="rankTable"></table></div></div>';
 
+  html += '<div class="block grid grid-2">'+
+    chartCard('team-revisit-trend-chart', '월별 재방문율 추이', team+' vs 전사 평균')+
+    chartCard('team-ftfr-trend-chart', '월별 FTFR 추이', team+' vs 전사 평균')+
+    '</div>';
+
   var hospTotal = DATA.revisit[team].total_hospital_count || DATA.revisit[team].hospitals.length;
   html += '<div class="block"><div class="block-head"><h2>담당 병원별 재방문율 / FTFR</h2><span class="hint">고장수리+점검 기준(방문 3건 이상) · '+team+' 서비스 건수 상위 '+DATA.revisit[team].hospitals.length+'개 병원 (전체 '+hospTotal+'개 중)</span></div>'+
     '<div class="card table-scroll" style="padding:6px;"><table class="data-table" id="hospTable"></table></div></div>';
@@ -479,6 +640,17 @@ function renderTeam(){
     {name:'이번 년도', color:'var(--accent)', values: mapMonthVals(teamData.month['이번 년도'])},
     {name:'직전 년도', color:'var(--text-muted)', values: mapMonthVals(teamData.month['직전 년도'])},
   ], {unit:'건'});
+
+  var rt = DATA.revisit_trend;
+  var partialIdx = rt.partial_month ? rt.months.indexOf(rt.partial_month) : -1;
+  pctTrendChart(document.getElementById('team-revisit-trend-chart'), rt.months, [
+    {name: team, color: TEAM_COLOR[team], values: rt.teams[team].revisit, n: rt.teams[team].n_rv},
+    {name: '전사 평균', color: 'var(--text-muted)', values: rt.company.revisit, n: rt.company.n_rv},
+  ], {target: DATA.benchmarks.revisit_target, targetLabel:'목표', partialIndex: partialIdx>=0?partialIdx:undefined});
+  pctTrendChart(document.getElementById('team-ftfr-trend-chart'), rt.months, [
+    {name: team, color: TEAM_COLOR[team], values: rt.teams[team].ftfr, n: rt.teams[team].n_ftfr},
+    {name: '전사 평균', color: 'var(--text-muted)', values: rt.company.ftfr, n: rt.company.n_ftfr},
+  ], {target: DATA.benchmarks.ftfr_target, targetLabel:'목표', partialIndex: partialIdx>=0?partialIdx:undefined});
 
   renderRankTable(team, period);
   renderHospTable(team);
@@ -645,15 +817,24 @@ function renderPerson(){
     statTile('소속팀 FTFR', pctStr(rv.ftfr), '', reliable?targetPill(rv.ftfr, DATA.benchmarks.ftfr_target,'higher-better'):'', '팀 평균 참고치 (개인별 데이터 아님)')+
     '</div>';
 
+  var trendRange = DATA.trend_months[0]+' ~ '+DATA.trend_months[DATA.trend_months.length-1];
   html2 += '<div class="block grid grid-2">'+
-    chartCard('p-score-chart', '비즈니스(장비 그룹)별 KPI 점수', '가중치 적용 · '+period)+
-    chartCard('p-group-chart', '비즈니스(장비 그룹)별 처리 건수', period)+
+    chartCard('p-score-chart', '비즈니스(장비 그룹)별 KPI 점수 (누적)', '가중치 적용 · '+period)+
+    chartCard('p-score-trend-chart', '비즈니스별 KPI 점수 추이', '월별 · '+trendRange)+
     '</div>';
   html2 += '<div class="block grid grid-2">'+
-    chartCard('p-svc-chart', '서비스 유형별 처리 건수', period)+
-    chartCard('p-mttr-chart', 'MTTR by 장비 그룹 (고장수리)', period+' · 목표 '+DATA.benchmarks.mttr_target+'분')+
+    chartCard('p-group-chart', '비즈니스(장비 그룹)별 처리 건수 (누적)', period)+
+    chartCard('p-group-trend-chart', '비즈니스별 처리 건수 추이', '월별 · '+trendRange)+
     '</div>';
-  html2 += '<div class="block">'+chartCard('p-trend-chart', '월별 처리 건수 추이', '이번 년도 vs 직전 년도')+'</div>';
+  html2 += '<div class="block grid grid-2">'+
+    chartCard('p-svc-chart', '서비스 유형별 처리 건수 (누적)', period)+
+    chartCard('p-svc-trend-chart', '유형별 처리 건수 추이', '월별 · '+trendRange)+
+    '</div>';
+  html2 += '<div class="block grid grid-2">'+
+    chartCard('p-mttr-chart', 'MTTR by 장비 그룹 (누적, 고장수리)', period+' · 목표 '+DATA.benchmarks.mttr_target+'분')+
+    chartCard('p-mttr-trend-chart', 'MTTR 추이', '월별 · 장비 그룹별 · '+trendRange)+
+    '</div>';
+  html2 += '<div class="block">'+chartCard('p-trend-chart', '월별 총 처리 건수 추이', '이번 년도 vs 직전 년도 (전체 합계)')+'</div>';
 
   html2 += '<div class="block"><div class="block-head"><h2>자주 방문한 병원 (Top 6)</h2><span class="hint">고장수리·PM 건수 기준 · 누적</span></div>'+
     '<div class="card table-scroll" style="padding:6px;"><table class="data-table"><thead><tr><th>병원명</th><th class="num">방문 건수</th></tr></thead><tbody>'+
@@ -677,6 +858,29 @@ function renderPerson(){
     {name:'이번 년도', color:'var(--accent)', values: mapMonthVals(pe.month['이번 년도'])},
     {name:'직전 년도', color:'var(--text-muted)', values: mapMonthVals(pe.month['직전 년도'])},
   ], {unit:'건'});
+
+  // ---- NEW: person-level calendar-month trend charts, paired with the four
+  // cumulative bar charts above. Each uses the same category breakdown (business
+  // group, or service type) and categorical colors as its cumulative counterpart.
+  var trendMonths = DATA.trend_months;
+  var partialIdx = DATA.trend_partial_month ? trendMonths.indexOf(DATA.trend_partial_month) : -1;
+  var pPartial = partialIdx>=0 ? partialIdx : undefined;
+
+  calLineChart(document.getElementById('p-score-trend-chart'), trendMonths, DATA.groups.map(function(g){
+    return {name: DATA.group_label[g], color: GROUP_COLOR[g], values: pe.trend_score_group[g]};
+  }), {unit:'점', decimals:true, partialIndex: pPartial});
+
+  calLineChart(document.getElementById('p-group-trend-chart'), trendMonths, DATA.groups.map(function(g){
+    return {name: DATA.group_label[g], color: GROUP_COLOR[g], values: pe.trend_group[g]};
+  }), {unit:'건', partialIndex: pPartial});
+
+  calLineChart(document.getElementById('p-svc-trend-chart'), trendMonths, DATA.buckets.map(function(b){
+    return {name: DATA.bucket_label[b], color: BUCKET_COLOR[b], values: pe.trend_bucket[b]};
+  }), {unit:'건', partialIndex: pPartial});
+
+  calLineChart(document.getElementById('p-mttr-trend-chart'), trendMonths, DATA.groups.map(function(g){
+    return {name: DATA.group_label[g], color: GROUP_COLOR[g], values: pe.trend_mttr[g]};
+  }), {unit:'분', decimals:true, partialIndex: pPartial});
 }
 
 /* ================= APP SHELL ================= */
